@@ -2,11 +2,10 @@
   "name": "Rooster Webtool",
   "short_name": "Rooster",
   "start_url": ".",
-  "display": "standalone",
+  "display": "browser",
   "background_color": "#ffffff",
   "theme_color": "#4CAF50",
   "icons": [
-    display: "browser"
     {
       "src": "https://raw.githubusercontent.com/Lars87-maker/PWA-Rooster/main/icon-192.png",
       "sizes": "192x192",
