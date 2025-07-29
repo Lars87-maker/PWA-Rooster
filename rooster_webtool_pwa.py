@@ -97,4 +97,24 @@ st.markdown(
     </script>
     """ ,
     unsafe_allow_html=True
+
+    # --- PWA Injectie ---
+import streamlit as st
+
+BASE_URL = "https://raw.githubusercontent.com/<jouw-github-user>/<jouw-repo>/main"
+
+st.markdown(
+    f"""
+    <link rel="manifest" href="{BASE_URL}/manifest.json">
+    <script>
+      if ("serviceWorker" in navigator) {{
+        navigator.serviceWorker.register("{BASE_URL}/service-worker.js")
+          .then(() => console.log("Service Worker Registered"))
+          .catch(err => console.error("Service Worker failed:", err));
+      }}
+    </script>
+    """,
+    unsafe_allow_html=True
+)
+
 )
