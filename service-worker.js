@@ -1,11 +1,8 @@
-self.addEventListener("install", (event) => {
+self.addEventListener("install", (e) => {
   console.log("Service Worker: Installed");
 });
 
-self.addEventListener("activate", (event) => {
-  console.log("Service Worker: Activated");
-});
-
-self.addEventListener("fetch", (event) => {
-  event.respondWith(fetch(event.request));
+self.addEventListener("fetch", (e) => {
+  // Je kunt hier caching logica toevoegen
+  console.log("Service Worker: Fetching", e.request.url);
 });
