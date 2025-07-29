@@ -86,7 +86,7 @@ if uploaded_file:
 
 
 # --- PWA Injectie ---
-BASE_URL = "https://raw.githubusercontent.com/<jouw-github-user>/<jouw-repo>/main"
+BASE_URL = "https://raw.githubusercontent.com/Lars87-maker/PWA-Rooster/main"
 
 st.markdown(
     f"""
