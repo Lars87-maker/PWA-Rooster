@@ -99,7 +99,6 @@ st.markdown(
     unsafe_allow_html=True
 
     # --- PWA Injectie ---
-import streamlit as st
 
 BASE_URL = "https://raw.githubusercontent.com/Lars87-maker/PWA-Rooster/main"
 
