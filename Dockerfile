@@ -14,11 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Hele project kopiëren
 COPY . .
 
-# Streamlit configuratie (disable telemetry)
+# Streamlit configuratie
 ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+ENV STREAMLIT_SERVER_HEADLESS=true
 
-# Expose poort die door Vercel wordt toegewezen
+# Vercel geeft een dynamische $PORT variabele
 EXPOSE 8501
 
-# Start commando voor Streamlit (met dynamische poort van Vercel)
-CMD streamlit run rooster_webtool_pwa.py --server.port=$PORT --server.address=0.0.0.0
+# Start Streamlit op de juiste poort
+CMD ["sh", "-c", "streamlit run rooster_webtool_pwa.py --server.port=$PORT --server.address=0.0.0.0"]
