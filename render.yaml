@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: flask-rooster-pwa
+    env: docker
+    plan: free
+    autoDeploy: true
