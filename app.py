@@ -5,28 +5,31 @@ import fitz  # PyMuPDF
 import re
 import io
 import os
+import uuid
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# Homepage
+
 @app.route("/")
 def index():
     return render_template("index.html")
 
-# Manifest.json
+
 @app.route("/manifest.json")
 def manifest():
     return send_from_directory("static", "manifest.json", mimetype="application/manifest+json")
 
-# Service worker
+
 @app.route("/service-worker.js")
 def service_worker():
     return send_from_directory("static", "service-worker.js", mimetype="application/javascript")
+
 
 # ---------------- PDF -> ICS functionaliteit ----------------
 
 def correct_time(time_str):
     return "23:59" if time_str == "24:00" else time_str
+
 
 def extract_events_from_text(text):
     events = []
@@ -42,14 +45,20 @@ def extract_events_from_text(text):
             continue
         if not onder_soort_kop:
             continue
+
+        # Datum detecteren
         date_match = re.match(r"(\d{2}/\d{2}/\d{4})", line)
         if date_match:
             current_date = datetime.strptime(date_match.group(1), "%d/%m/%Y")
             continue
+
+        # Activiteit detecteren
         activity_match = re.search(r"(?:Memo:\s*)?Activiteit:\s*(.+)", line)
         if activity_match and current_date:
             activiteiten_per_datum[current_date.date()] = activity_match.group(1).strip()
             continue
+
+        # Dienst detecteren
         dienst_match = re.search(r"(DIENST|CONSIG).*?(\d{2}:\d{2})-(\d{2}:\d{2})", line, re.IGNORECASE)
         if dienst_match and current_date:
             dienst_type = dienst_match.group(1).upper()
@@ -57,8 +66,10 @@ def extract_events_from_text(text):
             end_str = correct_time(dienst_match.group(3))
             start_dt = datetime.strptime(f"{current_date.date()} {start_str}", "%Y-%m-%d %H:%M")
             end_dt = datetime.strptime(f"{current_date.date()} {end_str}", "%Y-%m-%d %H:%M")
+
             if end_dt <= start_dt:
                 end_dt += timedelta(days=1)
+
             dienst_entries.append({
                 "date": current_date.date(),
                 "type": dienst_type,
@@ -76,16 +87,24 @@ def extract_events_from_text(text):
         })
     return events
 
+
 def create_ics(events):
     cal = Calendar()
+    cal.add("prodid", "-//Rooster Webtool//NL")
+    cal.add("version", "2.0")
+
     for event in events:
         e = Event()
-        e.add('summary', event['summary'])
-        e.add('dtstart', event['start'])
-        e.add('dtend', event['end'])
-        e.add('dtstamp', datetime.now())
+        e.add("uid", str(uuid.uuid4()) + "@rooster-webtool")
+        e.add("summary", event["summary"])
+        e.add("dtstart", event["start"])
+        e.add("dtend", event["end"])
+        e.add("dtstamp", datetime.now())
         cal.add_component(e)
-    return cal.to_ical()
+
+    # Fix: CRLF line endings voor compatibiliteit
+    return cal.to_ical().replace(b"\n", b"\r\n")
+
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -111,6 +130,7 @@ def upload():
         download_name="rooster.ics",
         mimetype="text/calendar"
     )
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
