@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rooster Webtool</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#4CAF50">
+</head>
+<body>
+  <h1>📅 Rooster Webtool</h1>
+  <p>Upload je PDF-rooster en genereer een ICS-bestand.</p>
+
+  <form action="/upload" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".pdf" required>
+    <button type="submit">Genereer ICS</button>
+  </form>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/service-worker.js")
+        .then(() => console.log("✅ Service Worker Registered"))
+        .catch(err => console.error("❌ SW error:", err));
+    }
+  </script>
+</body>
+</html>
