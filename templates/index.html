@@ -1,108 +1,97 @@
 <!DOCTYPE html>
 <html lang="nl">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rooster Webtool</title>
-    <link rel="manifest" href="/static/manifest.json">
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f4f7f9;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-        }
-        .container {
-            background: #fff;
-            padding: 2rem 3rem;
-            border-radius: 12px;
-            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
-            text-align: center;
-            max-width: 400px;
-            width: 100%;
-        }
-        h1 {
-            font-size: 1.8rem;
-            color: #333;
-            margin-bottom: 0.5rem;
-        }
-        p {
-            color: #555;
-            margin-bottom: 1.5rem;
-        }
-        .upload-btn {
-            display: block;
-            margin: 0 auto 1rem;
-            padding: 0.6rem 1rem;
-            border: 2px dashed #4CAF50;
-            border-radius: 8px;
-            background: #f9fff9;
-            cursor: pointer;
-            color: #333;
-            transition: all 0.2s;
-        }
-        .upload-btn:hover {
-            background: #eaffea;
-        }
-        input[type="file"] {
-            display: none;
-        }
-        .btn {
-            background: #4CAF50;
-            color: #fff;
-            border: none;
-            padding: 0.7rem 1.2rem;
-            border-radius: 8px;
-            font-size: 1rem;
-            cursor: pointer;
-            transition: background 0.3s;
-        }
-        .btn:hover {
-            background: #43a047;
-        }
-        .icon {
-            font-size: 3rem;
-            margin-bottom: 1rem;
-            color: #4CAF50;
-        }
-        #file-name {
-            margin-top: -0.5rem;
-            margin-bottom: 1rem;
-            font-size: 0.9rem;
-            color: #666;
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Rooster Webtool</title>
+  <link rel="manifest" href="/manifest.json"/>
+  <meta name="theme-color" content="#4CAF50"/>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; background:#f4f7f9; margin:0; min-height:100vh; display:grid; place-items:center; }
+    .card { background:#fff; padding:24px; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.06); max-width:560px; width:92%; }
+    h1 { margin:0 0 8px; font-size:1.4rem; }
+    p { margin:0 0 16px; color:#555; }
+    .upload { border:2px dashed #4CAF50; border-radius:10px; padding:14px; background:#f9fff9; cursor:pointer; text-align:center; }
+    .row { display:flex; gap:12px; align-items:center; margin-top:12px; }
+    button { background:#4CAF50; color:#fff; border:none; padding:12px 16px; border-radius:8px; cursor:pointer; font-weight:600; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    #error { color:#b00020; margin-top:10px; display:none; }
+    #ok { color:#0a7a3b; margin-top:10px; display:none; }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="icon">📅</div>
-        <h1>Rooster Webtool</h1>
-        <p>Upload je PDF-rooster en genereer een ICS-bestand voor je agenda.</p>
+  <div class="card">
+    <h1>PDF → Agenda (ICS)</h1>
+    <p>Upload je PDF-rooster. Je krijgt een <code>.ics</code>-bestand terug.</p>
 
-        <form action="/upload" method="post" enctype="multipart/form-data">
-            <label for="file-upload" class="upload-btn">
-                Klik om een PDF te selecteren
-            </label>
-            <input id="file-upload" type="file" name="file" required>
-            <p id="file-name">Geen bestand geselecteerd</p>
-            <button class="btn" type="submit">Genereer ICS</button>
-        </form>
-    </div>
+    <form id="form" method="POST" action="/upload" enctype="multipart/form-data">
+      <label class="upload">
+        <input id="file" name="file" type="file" accept="application/pdf" hidden />
+        <span id="filename">Klik om PDF te kiezen…</span>
+      </label>
+      <div class="row">
+        <button id="submit" type="submit" disabled>Maak ICS</button>
+      </div>
+      <div id="error"></div>
+      <div id="ok"></div>
+    </form>
+  </div>
 
-    <script>
-        const fileInput = document.getElementById('file-upload');
-        const fileNameDisplay = document.getElementById('file-name');
+  <script>
+    // Registreer SW
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/service-worker.js");
+    }
 
-        fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) {
-                fileNameDisplay.textContent = "📄 " + fileInput.files[0].name;
-            } else {
-                fileNameDisplay.textContent = "Geen bestand geselecteerd";
-            }
-        });
-    </script>
+    const file = document.getElementById("file");
+    const submit = document.getElementById("submit");
+    const filename = document.getElementById("filename");
+    const errorBox = document.getElementById("error");
+    const okBox = document.getElementById("ok");
+    const form = document.getElementById("form");
+
+    file.addEventListener("change", () => {
+      if (file.files.length) {
+        filename.textContent = "📄 " + file.files[0].name;
+        submit.disabled = false;
+      } else {
+        filename.textContent = "Klik om PDF te kiezen…";
+        submit.disabled = true;
+      }
+    });
+
+    // Vang het submitten af zodat we nette fouten kunnen tonen
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorBox.style.display = "none";
+      okBox.style.display = "none";
+
+      const fd = new FormData(form);
+      try {
+        const res = await fetch("/upload", { method: "POST", body: fd });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const msg = data.error || `Fout (${res.status})`;
+          errorBox.textContent = msg;
+          errorBox.style.display = "block";
+          return;
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "rooster.ics";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        okBox.textContent = "ICS succesvol gegenereerd 🎉";
+        okBox.style.display = "block";
+      } catch (err) {
+        errorBox.textContent = "Netwerkfout. Probeer opnieuw.";
+        errorBox.style.display = "block";
+      }
+    });
+  </script>
 </body>
 </html>
