@@ -1,4 +1,4 @@
-from flask import Flask, render_template, send_from_directory, request, send_file, jsonify
+from flask import Flask, render_template, send_from_directory, request, send_file, jsonify, make_response
 from datetime import datetime, timedelta, date
 from icalendar import Calendar, Event
 import fitz  # PyMuPDF
@@ -15,7 +15,11 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Zorg dat de browser en SW niet een oude HTML uit cache tonen
+    resp = make_response(render_template("index.html"))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 @app.route("/manifest.json")
 def manifest():
@@ -80,9 +84,9 @@ def _clean_text_short(s: str, limit: int = 80) -> str:
 
 def _service_title(service_raw: str) -> str:
     """
-    Maak een nette servicetitel:
+    Net label voor servicetype:
       - 'CONSIG' → 'Consig'
-      - varianten met 'DIENST' → 'Dienst'
+      - '*DIENST*' → 'Dienst'
       - '[Rust]' → 'Rust'
       - anders Title Case
     """
@@ -113,7 +117,6 @@ def _activity_tag_from_text(text: str) -> str:
         ]
         for k in known:
             if k in val:
-                # 'consig' als activiteit is verwarrend; dat is eigenlijk type
                 return "Consig" if k == "consig" else k.title()
         return " ".join(val.split()[:3]).title()
 
@@ -159,10 +162,6 @@ def extract_events_from_text(raw_text: str):
     if not date_iter:
         return events
 
-    # Service match:
-    #   - CONSIG
-    #   - [Rust] (overslaan)
-    #   - woorden met 'DIENST' (bv. 'AVOND DIENST', 'DIENST')
     SERVICE = r"(CONSIG|\[?\s*Rust\s*\]?|[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,20}DIENST[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,10})"
     service_re = re.compile(
         rf"(?i)\b{SERVICE}\b[^0-9]{{0,80}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
