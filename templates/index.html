@@ -1,66 +1,165 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="nl">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Rooster Webtool</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF → Agenda (ICS)</title>
   <link rel="manifest" href="/manifest.json"/>
   <meta name="theme-color" content="#4CAF50"/>
   <style>
-    body { font-family: system-ui, Arial, sans-serif; background:#f4f7f9; margin:0; min-height:100vh; display:grid; place-items:center; }
-    .card { background:#fff; padding:24px; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.06); max-width:560px; width:92%; }
-    h1 { margin:0 0 8px; font-size:1.4rem; }
-    p { margin:0 0 16px; color:#555; }
-    .upload { border:2px dashed #4CAF50; border-radius:10px; padding:14px; background:#f9fff9; cursor:pointer; text-align:center; }
-    .row { display:flex; gap:12px; align-items:center; margin-top:12px; }
-    button { background:#4CAF50; color:#fff; border:none; padding:12px 16px; border-radius:8px; cursor:pointer; font-weight:600; }
-    button:disabled { opacity:.5; cursor:not-allowed; }
-    #error { color:#b00020; margin-top:10px; display:none; }
-    #ok { color:#0a7a3b; margin-top:10px; display:none; }
+    :root{
+      --bg:#f6f8fb;
+      --card:#ffffff;
+      --text:#0f172a;
+      --muted:#64748b;
+      --primary:#4CAF50;
+      --primary-600:#3e9e43;
+      --ring:#a7f3d0;
+      --border:#e2e8f0;
+      --shadow:0 10px 30px rgba(2,6,23,.08);
+      --radius:16px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font:16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      color:var(--text);
+      background:var(--bg);
+      display:grid;
+      place-items:center;
+      padding:24px;
+    }
+    .card{
+      width:min(680px, 100%);
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:28px 28px 22px;
+    }
+    h1{
+      margin:0 0 6px;
+      font-size:clamp(20px, 2.2vw, 28px);
+      letter-spacing:.2px;
+    }
+    p.lead{
+      margin:0 0 18px;
+      color:var(--muted);
+    }
+
+    /* Upload-tegel */
+    .upload{
+      display:flex;
+      gap:12px;
+      align-items:center;
+      justify-content:center;
+      width:100%;
+      min-height:84px;
+      padding:16px;
+      border:2px dashed #9ad6a0;
+      border-radius:12px;
+      background:#f7fff8;
+      color:#0b3d18;
+      cursor:pointer;
+      transition:box-shadow .2s, transform .04s;
+      outline:none;
+    }
+    .upload:hover{ box-shadow:0 0 0 4px var(--ring); }
+    .upload:focus-within{ box-shadow:0 0 0 4px var(--ring); }
+    .upload:active{ transform:translateY(1px); }
+    .upload input{ display:none; }
+    .upload .label{
+      font-weight:600;
+    }
+    .subtle{
+      font-size:.9rem;
+      color:#246b35;
+    }
+
+    /* Actie-balk */
+    .row{ display:flex; gap:12px; align-items:center; margin-top:14px; }
+    .btn{
+      appearance:none; border:0; cursor:pointer;
+      padding:12px 16px; border-radius:10px;
+      background:var(--primary); color:#fff; font-weight:700;
+      transition:background .15s, transform .04s, box-shadow .2s;
+      box-shadow:0 6px 18px rgba(76,175,80,.22);
+    }
+    .btn:hover{ background:var(--primary-600); }
+    .btn:active{ transform:translateY(1px); }
+    .btn:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none; }
+
+    /* Meldingen */
+    .msg{ margin-top:10px; padding:10px 12px; border-radius:10px; display:none; }
+    .msg.error{ background:#fff1f2; color:#b91c1c; border:1px solid #fecaca; }
+    .msg.ok{ background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; }
+
+    /* Verberg eventuele ‘verdwaalde’ bullets/punten in de layout */
+    ul,ol{ list-style:none; padding-left:0; }
   </style>
 </head>
 <body>
-  <div class="card">
+  <main class="card">
     <h1>PDF → Agenda (ICS)</h1>
-    <p>Upload je PDF-rooster. Je krijgt een <code>.ics</code>-bestand terug.</p>
+    <p class="lead">Upload je PDF-rooster. Je krijgt een <code>.ics</code>-bestand terug.</p>
 
-    <form id="form" method="POST" action="/upload" enctype="multipart/form-data">
-      <label class="upload">
-        <input id="file" name="file" type="file" accept="application/pdf" hidden />
-        <span id="filename">Klik om PDF te kiezen…</span>
+    <form id="form" method="POST" action="/upload" enctype="multipart/form-data" novalidate>
+      <label class="upload" id="drop">
+        <input id="file" name="file" type="file" accept="application/pdf" />
+        <div>
+          <div class="label" id="filename">Klik om PDF te kiezen</div>
+          <div class="subtle">of sleep je bestand hierheen</div>
+        </div>
       </label>
+
       <div class="row">
-        <button id="submit" type="submit" disabled>Maak ICS</button>
+        <button class="btn" id="submit" type="submit" disabled>Maak ICS</button>
       </div>
-      <div id="error"></div>
-      <div id="ok"></div>
+
+      <div class="msg error" id="error"></div>
+      <div class="msg ok" id="ok"></div>
     </form>
-  </div>
+  </main>
 
   <script>
-    // Registreer SW
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/service-worker.js");
-    }
+    // Service worker blijft zoals je had:
+    if ("serviceWorker" in navigator) { navigator.serviceWorker.register("/service-worker.js"); }
 
-    const file = document.getElementById("file");
-    const submit = document.getElementById("submit");
+    const file     = document.getElementById("file");
+    const drop     = document.getElementById("drop");
+    const submit   = document.getElementById("submit");
     const filename = document.getElementById("filename");
     const errorBox = document.getElementById("error");
-    const okBox = document.getElementById("ok");
-    const form = document.getElementById("form");
+    const okBox    = document.getElementById("ok");
+    const form     = document.getElementById("form");
 
-    file.addEventListener("change", () => {
+    const setFileName = () => {
       if (file.files.length) {
         filename.textContent = "📄 " + file.files[0].name;
         submit.disabled = false;
       } else {
-        filename.textContent = "Klik om PDF te kiezen…";
+        filename.textContent = "Klik om PDF te kiezen";
         submit.disabled = true;
+      }
+    };
+    file.addEventListener("change", setFileName);
+
+    // Drag & drop polish
+    ["dragenter","dragover"].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); })
+    );
+    ["dragleave","drop"].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); })
+    );
+    drop.addEventListener("drop", e => {
+      const dt = e.dataTransfer;
+      if (dt && dt.files && dt.files[0]) {
+        file.files = dt.files;
+        setFileName();
       }
     });
 
-    // Vang het submitten af zodat we nette fouten kunnen tonen
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       errorBox.style.display = "none";
@@ -71,19 +170,15 @@
         const res = await fetch("/upload", { method: "POST", body: fd });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          const msg = data.error || `Fout (${res.status})`;
-          errorBox.textContent = msg;
+          errorBox.textContent = data.error || `Fout (${res.status})`;
           errorBox.style.display = "block";
           return;
         }
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url;
-        a.download = "rooster.ics";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        a.href = url; a.download = "rooster.ics";
+        document.body.appendChild(a); a.click(); a.remove();
         URL.revokeObjectURL(url);
         okBox.textContent = "ICS succesvol gegenereerd 🎉";
         okBox.style.display = "block";
