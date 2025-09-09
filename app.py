@@ -61,13 +61,13 @@ def _normalize_text(s: str) -> str:
     Normaliseert speciale tekens die vaak uit PDFs komen.
     - NBSP → spatie
     - en-dash/em-dash → '-'
+    - normaliseer regeleinden
     """
     s = (
         s.replace("\u00A0", " ")
          .replace("\u2013", "-")
          .replace("\u2014", "-")
     )
-    # Optioneel: CRLF → LF
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 def _parse_flexible_date(date_str: str) -> date | None:
@@ -85,39 +85,67 @@ def _fix_2400(t: str) -> str:
     # Sommige roosters gebruiken 24:00; zet om naar 23:59.
     return "23:59" if t == "24:00" else t
 
+def _clean_label(label: str) -> str:
+    """
+    Schoon de gevonden dienstnaam op (Avonddienst/Nachtdienst/Dienst/...).
+    """
+    label = label.strip(" :/.-–—\t\n\r")
+    label = re.sub(r"\s+", " ", label)
+    pretty = label.title()
+    return pretty if pretty else "Dienst"
+
+def _clean_activity(activity: str) -> str:
+    """
+    Schoon de gevonden activiteit op.
+    Neemt de eerste 'zin' of kolomwaarde na 'Activiteit'.
+    """
+    if not activity:
+        return ""
+    # pak slechts 80 tekens om uitwaaieren te voorkomen
+    activity = activity.strip(" :/.-–—\t\n\r")[:80]
+    activity = re.sub(r"\s+", " ", activity)
+    return activity
+
 
 # =========================
-# PARSER (per datumblok, neem ALLE diensten)
+# PARSER (per datumblok, neem ALLE diensten + label + activiteit)
 # =========================
 
 def extract_events_from_text(raw_text: str):
     """
-    Parser die ALLE diensten per dag meeneemt.
+    Parser die ALLE diensten per dag meeneemt, het type dienst én de activiteit koppelt.
 
-    Werkwijze:
+    Strategie:
       1) Vind elke datum (dd-mm[-yy] of dd/mm[-yy]).
       2) Neem de tekst van deze datum t/m de volgende datum (datumblok).
-      3) Binnen het blok: vind ALLE matches van '(...DIENST...) HH:MM–HH:MM' (tolerant voor en-/em-dash).
-         - We matchen op woorden die 'DIENST' bevatten (bv. AVONDDIENST, NACHTDIENST) én exact 'DIENST'.
-      4) Maak per match een event.
+      3) Binnen het blok: vind ALLE matches van '<LABEL met DIENST> HH:MM–HH:MM'.
+         - <LABEL> matcht 'DIENST', 'AVONDDIENST', 'AVOND DIENST', 'NACHTDIENST', etc.
+      4) Voor elke match:
+         - zoek in de nabijheid (context window) naar 'ACTIVITEIT: <...>' en neem de waarde als activiteit.
+           (We zoeken zowel vóór als ná de dienst-match, met tolerantie voor kolomsprongen.)
       5) Dedupliceer identieke tijdvakken binnen dezelfde dag.
     """
     text = _normalize_text(raw_text)
     events = []
 
-    # Vind alle datummatches
     date_iter = list(re.finditer(DATE_RE, text))
     if not date_iter:
         return events
 
-    # Regex voor service-lijnen binnen een datumblok:
-    #  - sta bv. "DIENST", "AVONDDIENST", "NACHTDIENST" toe met \w*DIENST\w*
-    #  - optionele dubbelepunt na (A(VOND)?|NACHT)?DIENST
-    #  - max ~60 niet-cijfertekens tot de tijd ("veiligheidsbuffer" ivm kolomsprongen)
+    # LABEL bevat DIENST-woord(groep); laat samenstellingen toe en spaties ertussen.
+    LABEL = r"([A-Za-zÀ-ÖØ-öø-ÿ]{0,20}(?:\s*[A-Za-zÀ-ÖØ-öø-ÿ]{0,20})?\s*DIENST(?:\s*[A-Za-zÀ-ÖØ-öø-ÿ]{0,20})?)"
+
+    # Match dienstlabel + tijden
     service_re = re.compile(
-        rf"(?i)\b\w*DIENST\w*\b[^0-9]{{0,60}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
+        rf"(?i)\b{LABEL}\b[^0-9]{{0,60}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
         re.DOTALL
     )
+
+    # Activiteit-patronen (meerdere varianten)
+    activity_line_res = [
+        re.compile(r"(?i)ACTIVITEIT\s*[:\-]?\s*(.+)"),  # Activiteit: Balie SEH
+        re.compile(r"(?i)ACTIVITEIT\s*$"),              # 'Activiteit' op zichzelf → volgende niet-lege regel oppakken (doen we handmatig)
+    ]
 
     for i, dm in enumerate(date_iter):
         date_str = dm.group(1)
@@ -129,19 +157,57 @@ def extract_events_from_text(raw_text: str):
         end_idx = date_iter[i + 1].start() if i + 1 < len(date_iter) else len(text)
         chunk = text[start_idx:end_idx]
 
+        # Voor activiteit-detectie werken we ook met regels
+        lines = [ln.strip() for ln in chunk.split("\n")]
+
+        def find_activity_near(pos_start: int, pos_end: int) -> str:
+            """
+            Zoek 'Activiteit' dicht in de buurt van de match.
+            1) Directe regel met 'Activiteit: ...'
+            2) Een regel 'Activiteit' en de eerstvolgende niet-lege regel als waarde
+            3) Als fallback: neem het dichtstbijzijnde 'Activiteit: ...' binnen ±400 tekens
+            """
+            ctx_before = chunk[max(0, pos_start - 400):pos_start]
+            ctx_after  = chunk[pos_end: min(len(chunk), pos_end + 400)]
+
+            # 1) Directe 'Activiteit: ...' in na-context (meest gebruikelijk)
+            for rx in activity_line_res:
+                m = rx.search(ctx_after)
+                if m and m.lastindex == 1:
+                    return _clean_activity(m.group(1))
+
+            # 2) Losse 'Activiteit' regel gevolgd door een waarde
+            #    We doorzoeken regels in de buurt (±8 regels vanaf match)
+            #    Heuristiek: vind regelindex van begin van match
+            start_line_idx = chunk[:pos_start].count("\n")
+            window = lines[start_line_idx: start_line_idx + 12]
+            for idx, ln in enumerate(window):
+                if re.fullmatch(r"(?i)activiteit", ln):
+                    # pak eerstvolgende niet-lege regel als waarde
+                    for j in range(idx + 1, min(idx + 5, len(window))):
+                        if window[j]:
+                            return _clean_activity(window[j])
+
+            # 3) Fallback: 'Activiteit: ...' in voor-context
+            for rx in activity_line_res:
+                m = rx.search(ctx_before)
+                if m and m.lastindex == 1:
+                    return _clean_activity(m.group(1))
+
+            return ""
+
         # Verzamel ALLE matches binnen dit datumblok
-        seen = set()  # voor deduplicatie binnen dezelfde dag
+        seen = set()
         for m in service_re.finditer(chunk):
-            start_s, end_s = _fix_2400(m.group(1)), _fix_2400(m.group(2))
+            raw_label = m.group(1)
+            start_s, end_s = _fix_2400(m.group(2)), _fix_2400(m.group(3))
 
             try:
                 sdt = datetime.combine(d, datetime.strptime(start_s, "%H:%M").time())
                 edt = datetime.combine(d, datetime.strptime(end_s,   "%H:%M").time())
             except ValueError:
-                # Onverwachte tijdnotatie: sla over
                 continue
 
-            # Over-middernacht
             if edt <= sdt:
                 edt += timedelta(days=1)
 
@@ -150,9 +216,24 @@ def extract_events_from_text(raw_text: str):
                 continue
             seen.add(key)
 
+            label = _clean_label(raw_label)
+            if not label or "Dienst" not in label.title():
+                label = "Dienst"
+
+            # Activiteit zoeken rond deze match
+            act = find_activity_near(m.start(), m.end())
+
+            # Bouw samenvatting & beschrijving
+            if act:
+                summary = f"{act} – {label}"
+                description = f"Activiteit: {act}\nSoort: {label}\nDatum: {d.strftime('%d-%m-%Y')}\nTijd: {start_s} - {end_s}"
+            else:
+                summary = label
+                description = f"Soort: {label}\nDatum: {d.strftime('%d-%m-%Y')}\nTijd: {start_s} - {end_s}"
+
             events.append({
-                # Als je het type (AVOND-/NACHT-/...) wilt meenemen: haal m.group(0) op en extraheren.
-                "summary": "DIENST",
+                "summary": summary,
+                "description": description,
                 "start": sdt,
                 "end": edt,
             })
@@ -172,6 +253,8 @@ def create_ics(events):
     for ev in events:
         ical_ev = Event()
         ical_ev.add("summary", ev["summary"])
+        if ev.get("description"):
+            ical_ev.add("description", ev["description"])
         ical_ev.add("dtstart", ev["start"])
         ical_ev.add("dtend", ev["end"])
         ical_ev.add("dtstamp", datetime.utcnow())
@@ -196,6 +279,8 @@ def upload():
 
         # Debug naar Render logs (handig bij issues)
         print(f"[DEBUG] PDF-tekst: {len(raw_text)} chars | gevonden diensten: {len(events)}")
+        if events:
+            print("[DEBUG] Voorbeeld:", events[0]["summary"])
 
         if not events:
             return jsonify(error="Geen diensten gevonden in dit PDF-bestand."), 400
