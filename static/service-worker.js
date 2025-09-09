@@ -1,39 +1,36 @@
-const CACHE_NAME = "rooster-pwa-cache-v1";
+const CACHE_NAME = "rooster-pwa-cache-v2";
+
 const urlsToCache = [
   "/",
   "/manifest.json",
   "/icon-192.png",
-  "/icon-512.png"
+  "/icon-512.png",
 ];
 
-self.addEventListener("install", event => {
+self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(urlsToCache))
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(urlsToCache))
   );
-  console.log("Service Worker: Installed & Assets Cached");
 });
 
-self.addEventListener("activate", event => {
+self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames.map(cache => {
-          if (cache !== CACHE_NAME) {
-            console.log("Service Worker: Clearing old cache:", cache);
-            return caches.delete(cache);
-          }
-        })
-      );
-    })
+    caches.keys().then((keys) =>
+      Promise.all(
+        keys
+          .filter((k) => k !== CACHE_NAME)
+          .map((k) => caches.delete(k))
+      )
+    )
   );
-  console.log("Service Worker: Activated");
 });
 
-self.addEventListener("fetch", event => {
+// Belangrijk: laat NIET-GET (zoals POST /upload) ongemoeid
+self.addEventListener("fetch", (event) => {
+  const req = event.request;
+  if (req.method !== "GET") return;
+
   event.respondWith(
-    caches.match(event.request).then(response => {
-      return response || fetch(event.request);
-    })
+    caches.match(req).then((cached) => cached || fetch(req))
   );
 });
