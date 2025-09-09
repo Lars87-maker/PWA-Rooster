@@ -5,6 +5,7 @@ import fitz  # PyMuPDF
 import re
 import io
 import os
+from collections import defaultdict
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -38,9 +39,6 @@ def service_worker():
 # =========================
 
 def extract_text_from_pdf(file_storage) -> str:
-    """
-    Leest het PDF-bestand met PyMuPDF en geeft platte tekst terug.
-    """
     data = file_storage.read()
     with fitz.open(stream=data, filetype="pdf") as doc:
         parts = [page.get_text() for page in doc]
@@ -51,18 +49,10 @@ def extract_text_from_pdf(file_storage) -> str:
 # PARSER HELPERS
 # =========================
 
-# accepteer 10-09-2025, 10/09/2025, 10-09-25, 10/09/25
 DATE_RE = r"(\d{2}[/-]\d{2}[/-](?:\d{2}|\d{4}))"
-# streepje in tijden kan '-', en-dash '–' of em-dash '—' zijn
 DASH = r"[-–—]"
 
 def _normalize_text(s: str) -> str:
-    """
-    Normaliseert speciale tekens die vaak uit PDFs komen.
-    - NBSP → spatie
-    - en-dash/em-dash → '-'
-    - normaliseer regeleinden
-    """
     s = (
         s.replace("\u00A0", " ")
          .replace("\u2013", "-")
@@ -71,9 +61,6 @@ def _normalize_text(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 def _parse_flexible_date(date_str: str) -> date | None:
-    """
-    Parseert dd-mm-yyyy / dd/mm/yyyy en dd-mm-yy / dd/mm/yy.
-    """
     for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y"):
         try:
             return datetime.strptime(date_str, fmt).date()
@@ -82,7 +69,6 @@ def _parse_flexible_date(date_str: str) -> date | None:
     return None
 
 def _fix_2400(t: str) -> str:
-    # Sommige roosters gebruiken 24:00; zet om naar 23:59.
     return "23:59" if t == "24:00" else t
 
 def _clean_text_short(s: str, limit: int = 80) -> str:
@@ -91,12 +77,6 @@ def _clean_text_short(s: str, limit: int = 80) -> str:
     return s[:limit]
 
 def _service_title(service_raw: str) -> str:
-    """
-    Maak een nette servicetitel:
-      - 'CONSIG' → 'Consig'
-      - varianten met 'DIENST' → 'Dienst'
-      - andere woorden → Title Case
-    """
     t = _clean_text_short(service_raw)
     up = t.upper()
     if "CONSIG" in up:
@@ -108,30 +88,19 @@ def _service_title(service_raw: str) -> str:
     return t.title()
 
 def _activity_tag_from_text(text: str) -> str:
-    """
-    Haal een korte activity tag uit tekst (bv. 'wijkzorg', 'achterwacht', 'surveilleren', ...).
-    We letten op 'Memo: Activiteit: ...' en op werkwoord/keywords in regels zoals
-    'Uitvoeren wijkzorg Zandvoort'.
-    """
-    # 1) Memo: Activiteit: <...>
     m = re.search(r"(?i)Memo:\s*Activiteit\s*:\s*(.+)", text)
     if m:
         val = _clean_text_short(m.group(1).lower())
-        # vaak staat er 'wijkzorg', 'achterwacht', 'operationeel coordinator', ...
-        # neem het eerste betekenisvolle woord of tweetal
-        # prioriteer bekende keywords
         known = [
             "wijkzorg", "achterwacht", "surveilleren", "operationeel coördineren",
-            "operationeel coordinator", "toezicht houden", "trainen", "werkverdelen",
-            "monitoren", "evenementen"
+            "operationeel coordinator", "toezicht houden", "trainen",
+            "werkverdelen", "monitoren", "evenementen", "afhandelen meldingen"
         ]
         for k in known:
             if k in val:
                 return k.title()
-        # anders: pak eerste 2 woorden
-        return " ".join(val.split()[:2]).title()
+        return " ".join(val.split()[:3]).title()
 
-    # 2) Regels met 'Uitvoeren wijkzorg', 'Surveilleren', 'Toezicht houden', ...
     verbs = [
         r"(?i)\buitvoeren\s+wijkzorg\b",
         r"(?i)\bsurveilleren\b",
@@ -142,49 +111,40 @@ def _activity_tag_from_text(text: str) -> str:
         r"(?i)\btrainen\b",
         r"(?i)\bevenementen\b",
         r"(?i)\bachterwacht\b",
-        r"(?i)\wijkzorg\b",
+        r"(?i)\bafhandelen\s+meldingen\b",
+        r"(?i)\bwijkzorg\b",
     ]
     for rx in verbs:
         m2 = re.search(rx, text)
         if m2:
             ph = m2.group(0)
-            # normaliseer aantal woorden
             ph = _clean_text_short(ph.title())
-            # 'Uitvoeren Wijkzorg' → 'Wijkzorg'
             ph = re.sub(r"(?i)^Uitvoeren\s+", "", ph).strip()
             return ph
-
     return ""
 
 # =========================
-# PARSER (per datumblok, neem ALLE diensten en bepaal Type/Activiteit)
+# PARSER (alle diensten + type + activiteit)
 # =========================
 
 def extract_events_from_text(raw_text: str):
     """
-    Parser die ALLE diensten per dag meeneemt, en de ICS-titel bouwt met Type/Activiteit:
-      - SUMMARY = 'Consig' als servicetype CONSIG is,
-                  anders SUMMARY = <ActivityTag> (bijv. 'Wijkzorg'),
-                  anders 'Dienst'.
-      - DESCRIPTION bevat Type + Activiteit + Datum + Tijd.
-      - GEEN weekdag in de titel.
+    - Neemt ALLE diensten per dag mee
+    - Vindt servicetype (Consig/Dienst/…)
+    - Vindt activiteit rondom de match
+    - Retourneert ruwe events; wordt daarna opgeschoond (merge CONSIG, verwijder all-day artefacts)
     """
     text = _normalize_text(raw_text)
     events = []
 
-    # Vind alle datummatches
     date_iter = list(re.finditer(DATE_RE, text))
     if not date_iter:
         return events
 
     # Service match:
-    #   - CONSIG
-    #   - [Rust] (negeren we later)
-    #   - woorden met 'DIENST' (bv. 'AVOND DIENST', 'DIENST')
     SERVICE = r"(CONSIG|\[?\s*Rust\s*\]?|[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,20}DIENST[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,10})"
-
     service_re = re.compile(
-        rf"(?i)\b{SERVICE}\b[^0-9]{{0,60}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
+        rf"(?i)\b{SERVICE}\b[^0-9]{{0,80}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
         re.DOTALL
     )
 
@@ -197,45 +157,31 @@ def extract_events_from_text(raw_text: str):
         start_idx = dm.end()
         end_idx = date_iter[i + 1].start() if i + 1 < len(date_iter) else len(text)
         chunk = text[start_idx:end_idx]
-
-        # Voor activiteit-detectie werken we naast substring ook met een lokale context
         lines = [ln.strip() for ln in chunk.split("\n")]
 
         def find_activity_near(pos_start: int, pos_end: int) -> str:
-            """
-            Zoek naar 'Activiteit' rond de match (±400 tekens om de match).
-            """
-            ctx_before = chunk[max(0, pos_start - 400):pos_start]
-            ctx_after  = chunk[pos_end: min(len(chunk), pos_end + 400)]
-
-            # 1) Meest voorkomend: na de dienst staat 'Memo: Activiteit: ...'
+            ctx_before = chunk[max(0, pos_start - 500):pos_start]
+            ctx_after  = chunk[pos_end: min(len(chunk), pos_end + 500)]
             tag = _activity_tag_from_text(ctx_after)
             if tag:
                 return tag
-
-            # 2) Soms staat 'Activiteit' er vlak vóór
             tag = _activity_tag_from_text(ctx_before)
             if tag:
                 return tag
-
-            # 3) Heel lokale fallback: pak één regel na de match
             line_start = chunk[:pos_start].count("\n")
-            for j in range(line_start, min(line_start + 6, len(lines))):
+            for j in range(line_start, min(line_start + 8, len(lines))):
                 t = _activity_tag_from_text(lines[j])
                 if t:
                     return t
             return ""
 
-        # Verzamel ALLE services binnen dit datumblok
         seen = set()
         for m in service_re.finditer(chunk):
             service_raw = m.group(1)
-            start_s, end_s = _fix_2400(m.group(2)), _fix_2400(m.group(3))
-
-            # [Rust] negeren
             if re.search(r"(?i)rust", service_raw):
-                continue
+                continue  # sla 'Rust' over
 
+            start_s, end_s = _fix_2400(m.group(2)), _fix_2400(m.group(3))
             try:
                 sdt = datetime.combine(d, datetime.strptime(start_s, "%H:%M").time())
                 edt = datetime.combine(d, datetime.strptime(end_s,   "%H:%M").time())
@@ -250,21 +196,17 @@ def extract_events_from_text(raw_text: str):
                 continue
             seen.add(key)
 
-            service_kind = _service_title(service_raw)  # 'Consig' / 'Dienst' / ...
-            activity_tag = find_activity_near(m.start(), m.end())  # bv. 'Wijkzorg'
+            service_kind = _service_title(service_raw)   # 'Consig' / 'Dienst' / …
+            activity_tag = find_activity_near(m.start(), m.end())
 
-            # --- SUMMARY keuze ---
-            # 1) CONSIG domineert
+            # SUMMARY-regel: CONSIG domineert; anders activiteit; anders Dienst
             if service_kind.lower() == "consig":
                 summary = "Consig"
-            # 2) Anders, als we een activiteit hebben (bv. Wijkzorg), gebruik die
             elif activity_tag:
                 summary = activity_tag
-            # 3) Anders generiek
             else:
                 summary = "Dienst"
 
-            # Beschrijving (geen weekdag in titel; hier mag datum/tijd)
             desc_parts = [f"Type: {service_kind}"]
             if activity_tag:
                 desc_parts.append(f"Activiteit: {activity_tag}")
@@ -274,12 +216,78 @@ def extract_events_from_text(raw_text: str):
 
             events.append({
                 "summary": summary,
-                "description": description,
+                "type": service_kind,       # bewaar origin type voor post-processing
+                "activity": activity_tag,
                 "start": sdt,
                 "end": edt,
+                "description": description,
             })
 
     return events
+
+
+# =========================
+# OPSCHONEN: merge CONSIG + verwijder all-day artefacts
+# =========================
+
+def _same_day(dt1: datetime, dt2: datetime) -> bool:
+    return dt1.date() == dt2.date()
+
+def post_process_events(events: list) -> list:
+    if not events:
+        return events
+
+    # 1) Sorteer
+    events.sort(key=lambda e: (e["start"], e["end"], e["summary"]))
+
+    # 2) Merge aaneengesloten CONSIG-blokken (end == next.start)
+    merged = []
+    for ev in events:
+        if ev["type"].lower() != "consig":
+            merged.append(ev)
+            continue
+
+        if merged and merged[-1]["type"].lower() == "consig" and merged[-1]["end"] == ev["start"]:
+            # Plak aan vorige CONSIG vast
+            merged[-1]["end"] = ev["end"]
+            # Update beschrijving (alleen tijden en datumrange aanpassen)
+            start_dt = merged[-1]["start"]
+            end_dt = merged[-1]["end"]
+            merged[-1]["description"] = (
+                f"Type: Consig\n"
+                f"Periode: {start_dt.strftime('%d-%m-%Y %H:%M')} → {end_dt.strftime('%d-%m-%Y %H:%M')}"
+            )
+        else:
+            # Maak CONSIG-beschrijving als periode (helder bij dagoverschrijding)
+            if ev["type"].lower() == "consig":
+                ev["description"] = (
+                    f"Type: Consig\n"
+                    f"Periode: {ev['start'].strftime('%d-%m-%Y %H:%M')} → {ev['end'].strftime('%d-%m-%Y %H:%M')}"
+                )
+            merged.append(ev)
+
+    # 3) Verwijder ‘volledige dag’-artefacten (00:00–23:59) als er die dag andere events zijn
+    cleaned = []
+    by_day = defaultdict(list)
+    for ev in merged:
+        by_day[ev["start"].date()].append(ev)
+
+    for day, day_events in by_day.items():
+        # detect all-day artefacten
+        all_day = [e for e in day_events if e["start"].time() == datetime.min.time()
+                   and e["end"].time() in (datetime.strptime("23:59", "%H:%M").time(),
+                                           datetime.strptime("00:00", "%H:%M").time())
+                   and e["type"].lower() == "dienst"]
+        if all_day and len(day_events) > len(all_day):
+            # er zijn andere events deze dag → drop all-day diensten
+            keep = [e for e in day_events if e not in all_day]
+        else:
+            keep = day_events
+        cleaned.extend(keep)
+
+    # 4) Final sort
+    cleaned.sort(key=lambda e: (e["start"], e["end"], e["summary"]))
+    return cleaned
 
 
 # =========================
@@ -316,12 +324,12 @@ def upload():
             return jsonify(error="Geen bestand ontvangen."), 400
 
         raw_text = extract_text_from_pdf(f)
-        events = extract_events_from_text(raw_text)
+        raw_events = extract_events_from_text(raw_text)
+        events = post_process_events(raw_events)
 
-        # Debug naar Render logs (handig bij issues)
-        print(f"[DEBUG] PDF-tekst: {len(raw_text)} chars | gevonden diensten: {len(events)}")
+        print(f"[DEBUG] Tekst: {len(raw_text)} chars | ruwe: {len(raw_events)} | na opschonen: {len(events)}")
         if events:
-            print("[DEBUG] Voorbeeld:", events[0]["summary"], "|", events[0].get("description","")[:80])
+            print("[DEBUG] Voorbeeld:", events[0]["summary"], events[0]["start"], "→", events[0]["end"])
 
         if not events:
             return jsonify(error="Geen diensten gevonden in dit PDF-bestand."), 400
