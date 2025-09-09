@@ -6,6 +6,7 @@ import re
 import io
 import os
 from collections import defaultdict
+from typing import Optional
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -15,7 +16,7 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 
 @app.route("/")
 def index():
-    # Zorg dat de browser en SW niet een oude HTML uit cache tonen
+    # Zorg dat browser en SW niet een oude HTML uit cache tonen
     resp = make_response(render_template("index.html"))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -66,12 +67,36 @@ def _normalize_text(s: str) -> str:
     )
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
-def _parse_flexible_date(date_str: str):
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y"):
+def _detect_document_year(text: str) -> Optional[int]:
+    """
+    Zoekt een logisch documentjaar (bv. in 'Periode ... 2025', 'Afgedrukt op 09/09/2025', etc.).
+    Neemt de grootste 20xx die voorkomt.
+    """
+    years = [int(y) for y in re.findall(r"\b(20\d{2})\b", text)]
+    return max(years) if years else None
+
+def _parse_flexible_date(date_str: str, default_year: Optional[int] = None):
+    """
+    Parseert dd-mm-yyyy / dd/mm/yyyy en dd-mm-yy / dd/mm/yy.
+    - Bij 2-cijferig jaar en default_year meegegeven: forceer jaar -> default_year.
+    """
+    # Eerst: 4-cijferige jaren
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
         try:
             return datetime.strptime(date_str, fmt).date()
         except ValueError:
-            continue
+            pass
+
+    # Dan: 2-cijferige jaren
+    for fmt in ("%d-%m-%y", "%d/%m/%y"):
+        try:
+            d = datetime.strptime(date_str, fmt).date()
+            if default_year is not None:
+                return d.replace(year=default_year)
+            return d
+        except ValueError:
+            pass
+
     return None
 
 def _fix_2400(t: str) -> str:
@@ -103,7 +128,7 @@ def _service_title(service_raw: str) -> str:
 def _activity_tag_from_text(text: str) -> str:
     """
     Haal een korte activiteit uit omliggende tekst (bv. 'Wijkzorg', 'Achterwacht', ...).
-    We letten op 'Memo: Activiteit: ...' en op enkele werkwoord/keyword-patronen.
+    Let op 'Memo: Activiteit: ...' en een set werkwoord/keyword-patronen.
     """
     # 1) Memo: Activiteit: <...>
     m = re.search(r"(?i)Memo:\s*Activiteit\s*:\s*(.+)", text)
@@ -153,10 +178,14 @@ def extract_events_from_text(raw_text: str):
     - Neemt ALLE diensten per dag mee
     - Vindt servicetype (Consig/Dienst/…)
     - Vindt activiteit rondom de match
+    - Fix 2-cijferige jaren via documentjaar
     - Retourneert ruwe events; wordt daarna opgeschoond (merge CONSIG, verwijder all-day artefacts)
     """
     text = _normalize_text(raw_text)
     events = []
+
+    # detecteer documentjaar voor 2-cijferige datums
+    doc_year = _detect_document_year(text)
 
     date_iter = list(re.finditer(DATE_RE, text))
     if not date_iter:
@@ -170,7 +199,7 @@ def extract_events_from_text(raw_text: str):
 
     for i, dm in enumerate(date_iter):
         date_str = dm.group(1)
-        d = _parse_flexible_date(date_str)
+        d = _parse_flexible_date(date_str, default_year=doc_year)
         if d is None:
             continue
 
