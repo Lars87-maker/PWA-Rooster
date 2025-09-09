@@ -10,7 +10,7 @@ from collections import defaultdict
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # =========================
-# PWA ROUTES
+# PWA ROUTES (frontend ongewijzigd laten)
 # =========================
 
 @app.route("/")
@@ -49,7 +49,9 @@ def extract_text_from_pdf(file_storage) -> str:
 # PARSER HELPERS
 # =========================
 
+# accepteer 10-09-2025, 10/09/2025, 10-09-25, 10/09/25
 DATE_RE = r"(\d{2}[/-]\d{2}[/-](?:\d{2}|\d{4}))"
+# streepje in tijden kan '-', en-dash '–' of em-dash '—' zijn
 DASH = r"[-–—]"
 
 def _normalize_text(s: str) -> str:
@@ -60,7 +62,7 @@ def _normalize_text(s: str) -> str:
     )
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
-def _parse_flexible_date(date_str: str) -> date | None:
+def _parse_flexible_date(date_str: str):
     for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y"):
         try:
             return datetime.strptime(date_str, fmt).date()
@@ -77,6 +79,13 @@ def _clean_text_short(s: str, limit: int = 80) -> str:
     return s[:limit]
 
 def _service_title(service_raw: str) -> str:
+    """
+    Maak een nette servicetitel:
+      - 'CONSIG' → 'Consig'
+      - varianten met 'DIENST' → 'Dienst'
+      - '[Rust]' → 'Rust'
+      - anders Title Case
+    """
     t = _clean_text_short(service_raw)
     up = t.upper()
     if "CONSIG" in up:
@@ -88,19 +97,27 @@ def _service_title(service_raw: str) -> str:
     return t.title()
 
 def _activity_tag_from_text(text: str) -> str:
+    """
+    Haal een korte activiteit uit omliggende tekst (bv. 'Wijkzorg', 'Achterwacht', ...).
+    We letten op 'Memo: Activiteit: ...' en op enkele werkwoord/keyword-patronen.
+    """
+    # 1) Memo: Activiteit: <...>
     m = re.search(r"(?i)Memo:\s*Activiteit\s*:\s*(.+)", text)
     if m:
         val = _clean_text_short(m.group(1).lower())
         known = [
             "wijkzorg", "achterwacht", "surveilleren", "operationeel coördineren",
             "operationeel coordinator", "toezicht houden", "trainen",
-            "werkverdelen", "monitoren", "evenementen", "afhandelen meldingen"
+            "werkverdelen", "monitoren", "evenementen", "afhandelen meldingen",
+            "consig"
         ]
         for k in known:
             if k in val:
-                return k.title()
+                # 'consig' als activiteit is verwarrend; dat is eigenlijk type
+                return "Consig" if k == "consig" else k.title()
         return " ".join(val.split()[:3]).title()
 
+    # 2) Losse keywords/werkwoorden
     verbs = [
         r"(?i)\buitvoeren\s+wijkzorg\b",
         r"(?i)\bsurveilleren\b",
@@ -123,6 +140,7 @@ def _activity_tag_from_text(text: str) -> str:
             return ph
     return ""
 
+
 # =========================
 # PARSER (alle diensten + type + activiteit)
 # =========================
@@ -142,6 +160,9 @@ def extract_events_from_text(raw_text: str):
         return events
 
     # Service match:
+    #   - CONSIG
+    #   - [Rust] (overslaan)
+    #   - woorden met 'DIENST' (bv. 'AVOND DIENST', 'DIENST')
     SERVICE = r"(CONSIG|\[?\s*Rust\s*\]?|[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,20}DIENST[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,10})"
     service_re = re.compile(
         rf"(?i)\b{SERVICE}\b[^0-9]{{0,80}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
@@ -197,9 +218,9 @@ def extract_events_from_text(raw_text: str):
             seen.add(key)
 
             service_kind = _service_title(service_raw)   # 'Consig' / 'Dienst' / …
-            activity_tag = find_activity_near(m.start(), m.end())
+            activity_tag = find_activity_near(m.start(), m.end())  # bv. 'Wijkzorg'
 
-            # SUMMARY-regel: CONSIG domineert; anders activiteit; anders Dienst
+            # SUMMARY: CONSIG domineert; anders activiteit; anders Dienst
             if service_kind.lower() == "consig":
                 summary = "Consig"
             elif activity_tag:
@@ -230,9 +251,6 @@ def extract_events_from_text(raw_text: str):
 # OPSCHONEN: merge CONSIG + verwijder all-day artefacts
 # =========================
 
-def _same_day(dt1: datetime, dt2: datetime) -> bool:
-    return dt1.date() == dt2.date()
-
 def post_process_events(events: list) -> list:
     if not events:
         return events
@@ -250,7 +268,7 @@ def post_process_events(events: list) -> list:
         if merged and merged[-1]["type"].lower() == "consig" and merged[-1]["end"] == ev["start"]:
             # Plak aan vorige CONSIG vast
             merged[-1]["end"] = ev["end"]
-            # Update beschrijving (alleen tijden en datumrange aanpassen)
+            # Update beschrijving als doorlopende periode
             start_dt = merged[-1]["start"]
             end_dt = merged[-1]["end"]
             merged[-1]["description"] = (
@@ -259,11 +277,10 @@ def post_process_events(events: list) -> list:
             )
         else:
             # Maak CONSIG-beschrijving als periode (helder bij dagoverschrijding)
-            if ev["type"].lower() == "consig":
-                ev["description"] = (
-                    f"Type: Consig\n"
-                    f"Periode: {ev['start'].strftime('%d-%m-%Y %H:%M')} → {ev['end'].strftime('%d-%m-%Y %H:%M')}"
-                )
+            ev["description"] = (
+                f"Type: Consig\n"
+                f"Periode: {ev['start'].strftime('%d-%m-%Y %H:%M')} → {ev['end'].strftime('%d-%m-%Y %H:%M')}"
+            )
             merged.append(ev)
 
     # 3) Verwijder ‘volledige dag’-artefacten (00:00–23:59) als er die dag andere events zijn
@@ -273,13 +290,16 @@ def post_process_events(events: list) -> list:
         by_day[ev["start"].date()].append(ev)
 
     for day, day_events in by_day.items():
-        # detect all-day artefacten
-        all_day = [e for e in day_events if e["start"].time() == datetime.min.time()
-                   and e["end"].time() in (datetime.strptime("23:59", "%H:%M").time(),
-                                           datetime.strptime("00:00", "%H:%M").time())
-                   and e["type"].lower() == "dienst"]
+        all_day = [
+            e for e in day_events
+            if e["start"].time() == datetime.strptime("00:00", "%H:%M").time()
+            and e["end"].time() in (
+                datetime.strptime("23:59", "%H:%M").time(),
+                datetime.strptime("00:00", "%H:%M").time()
+            )
+            and e["type"].lower() == "dienst"
+        ]
         if all_day and len(day_events) > len(all_day):
-            # er zijn andere events deze dag → drop all-day diensten
             keep = [e for e in day_events if e not in all_day]
         else:
             keep = day_events
