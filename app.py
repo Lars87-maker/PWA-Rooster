@@ -85,67 +85,108 @@ def _fix_2400(t: str) -> str:
     # Sommige roosters gebruiken 24:00; zet om naar 23:59.
     return "23:59" if t == "24:00" else t
 
-def _clean_label(label: str) -> str:
-    """
-    Schoon de gevonden dienstnaam op (Avonddienst/Nachtdienst/Dienst/...).
-    """
-    label = label.strip(" :/.-–—\t\n\r")
-    label = re.sub(r"\s+", " ", label)
-    pretty = label.title()
-    return pretty if pretty else "Dienst"
+def _clean_text_short(s: str, limit: int = 80) -> str:
+    s = s.strip(" :/.-–—\t\n\r")
+    s = re.sub(r"\s+", " ", s)
+    return s[:limit]
 
-def _clean_activity(activity: str) -> str:
+def _service_title(service_raw: str) -> str:
     """
-    Schoon de gevonden activiteit op.
-    Neemt de eerste 'zin' of kolomwaarde na 'Activiteit'.
+    Maak een nette servicetitel:
+      - 'CONSIG' → 'Consig'
+      - varianten met 'DIENST' → 'Dienst'
+      - andere woorden → Title Case
     """
-    if not activity:
-        return ""
-    # pak slechts 80 tekens om uitwaaieren te voorkomen
-    activity = activity.strip(" :/.-–—\t\n\r")[:80]
-    activity = re.sub(r"\s+", " ", activity)
-    return activity
+    t = _clean_text_short(service_raw)
+    up = t.upper()
+    if "CONSIG" in up:
+        return "Consig"
+    if "DIENST" in up:
+        return "Dienst"
+    if "RUST" in up:
+        return "Rust"
+    return t.title()
 
+def _activity_tag_from_text(text: str) -> str:
+    """
+    Haal een korte activity tag uit tekst (bv. 'wijkzorg', 'achterwacht', 'surveilleren', ...).
+    We letten op 'Memo: Activiteit: ...' en op werkwoord/keywords in regels zoals
+    'Uitvoeren wijkzorg Zandvoort'.
+    """
+    # 1) Memo: Activiteit: <...>
+    m = re.search(r"(?i)Memo:\s*Activiteit\s*:\s*(.+)", text)
+    if m:
+        val = _clean_text_short(m.group(1).lower())
+        # vaak staat er 'wijkzorg', 'achterwacht', 'operationeel coordinator', ...
+        # neem het eerste betekenisvolle woord of tweetal
+        # prioriteer bekende keywords
+        known = [
+            "wijkzorg", "achterwacht", "surveilleren", "operationeel coördineren",
+            "operationeel coordinator", "toezicht houden", "trainen", "werkverdelen",
+            "monitoren", "evenementen"
+        ]
+        for k in known:
+            if k in val:
+                return k.title()
+        # anders: pak eerste 2 woorden
+        return " ".join(val.split()[:2]).title()
+
+    # 2) Regels met 'Uitvoeren wijkzorg', 'Surveilleren', 'Toezicht houden', ...
+    verbs = [
+        r"(?i)\buitvoeren\s+wijkzorg\b",
+        r"(?i)\bsurveilleren\b",
+        r"(?i)\bwerkverdelen(?:\s+en\s+monitoren)?\b",
+        r"(?i)\bmonitoren\b",
+        r"(?i)\boperationeel\s+co[oö]rdineren\b",
+        r"(?i)\btoezicht\s+houden\b",
+        r"(?i)\btrainen\b",
+        r"(?i)\bevenementen\b",
+        r"(?i)\bachterwacht\b",
+        r"(?i)\wijkzorg\b",
+    ]
+    for rx in verbs:
+        m2 = re.search(rx, text)
+        if m2:
+            ph = m2.group(0)
+            # normaliseer aantal woorden
+            ph = _clean_text_short(ph.title())
+            # 'Uitvoeren Wijkzorg' → 'Wijkzorg'
+            ph = re.sub(r"(?i)^Uitvoeren\s+", "", ph).strip()
+            return ph
+
+    return ""
 
 # =========================
-# PARSER (per datumblok, neem ALLE diensten + label + activiteit)
+# PARSER (per datumblok, neem ALLE diensten en bepaal Type/Activiteit)
 # =========================
 
 def extract_events_from_text(raw_text: str):
     """
-    Parser die ALLE diensten per dag meeneemt, het type dienst én de activiteit koppelt.
-
-    Strategie:
-      1) Vind elke datum (dd-mm[-yy] of dd/mm[-yy]).
-      2) Neem de tekst van deze datum t/m de volgende datum (datumblok).
-      3) Binnen het blok: vind ALLE matches van '<LABEL met DIENST> HH:MM–HH:MM'.
-         - <LABEL> matcht 'DIENST', 'AVONDDIENST', 'AVOND DIENST', 'NACHTDIENST', etc.
-      4) Voor elke match:
-         - zoek in de nabijheid (context window) naar 'ACTIVITEIT: <...>' en neem de waarde als activiteit.
-           (We zoeken zowel vóór als ná de dienst-match, met tolerantie voor kolomsprongen.)
-      5) Dedupliceer identieke tijdvakken binnen dezelfde dag.
+    Parser die ALLE diensten per dag meeneemt, en de ICS-titel bouwt met Type/Activiteit:
+      - SUMMARY = 'Consig' als servicetype CONSIG is,
+                  anders SUMMARY = <ActivityTag> (bijv. 'Wijkzorg'),
+                  anders 'Dienst'.
+      - DESCRIPTION bevat Type + Activiteit + Datum + Tijd.
+      - GEEN weekdag in de titel.
     """
     text = _normalize_text(raw_text)
     events = []
 
+    # Vind alle datummatches
     date_iter = list(re.finditer(DATE_RE, text))
     if not date_iter:
         return events
 
-    # LABEL bevat DIENST-woord(groep); laat samenstellingen toe en spaties ertussen.
-    LABEL = r"([A-Za-zÀ-ÖØ-öø-ÿ]{0,20}(?:\s*[A-Za-zÀ-ÖØ-öø-ÿ]{0,20})?\s*DIENST(?:\s*[A-Za-zÀ-ÖØ-öø-ÿ]{0,20})?)"
+    # Service match:
+    #   - CONSIG
+    #   - [Rust] (negeren we later)
+    #   - woorden met 'DIENST' (bv. 'AVOND DIENST', 'DIENST')
+    SERVICE = r"(CONSIG|\[?\s*Rust\s*\]?|[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,20}DIENST[A-Za-zÀ-ÖØ-öø-ÿ\s]{0,10})"
 
-    # Match dienstlabel + tijden
     service_re = re.compile(
-        rf"(?i)\b{LABEL}\b[^0-9]{{0,60}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
+        rf"(?i)\b{SERVICE}\b[^0-9]{{0,60}}(\d{{2}}:\d{{2}})\s*{DASH}\s*(\d{{2}}:\d{{2}})",
         re.DOTALL
     )
-
-    # Activiteit-patronen (meerdere varianten)
-    activity_line_res = [
-        re.compile(r"(?i)ACTIVITEIT\s*[:\-]?\s*(.+)"),  # Activiteit: Balie SEH
-        re.compile(r"(?i)ACTIVITEIT\s*$"),              # 'Activiteit' op zichzelf → volgende niet-lege regel oppakken (doen we handmatig)
-    ]
 
     for i, dm in enumerate(date_iter):
         date_str = dm.group(1)
@@ -157,50 +198,43 @@ def extract_events_from_text(raw_text: str):
         end_idx = date_iter[i + 1].start() if i + 1 < len(date_iter) else len(text)
         chunk = text[start_idx:end_idx]
 
-        # Voor activiteit-detectie werken we ook met regels
+        # Voor activiteit-detectie werken we naast substring ook met een lokale context
         lines = [ln.strip() for ln in chunk.split("\n")]
 
         def find_activity_near(pos_start: int, pos_end: int) -> str:
             """
-            Zoek 'Activiteit' dicht in de buurt van de match.
-            1) Directe regel met 'Activiteit: ...'
-            2) Een regel 'Activiteit' en de eerstvolgende niet-lege regel als waarde
-            3) Als fallback: neem het dichtstbijzijnde 'Activiteit: ...' binnen ±400 tekens
+            Zoek naar 'Activiteit' rond de match (±400 tekens om de match).
             """
             ctx_before = chunk[max(0, pos_start - 400):pos_start]
             ctx_after  = chunk[pos_end: min(len(chunk), pos_end + 400)]
 
-            # 1) Directe 'Activiteit: ...' in na-context (meest gebruikelijk)
-            for rx in activity_line_res:
-                m = rx.search(ctx_after)
-                if m and m.lastindex == 1:
-                    return _clean_activity(m.group(1))
+            # 1) Meest voorkomend: na de dienst staat 'Memo: Activiteit: ...'
+            tag = _activity_tag_from_text(ctx_after)
+            if tag:
+                return tag
 
-            # 2) Losse 'Activiteit' regel gevolgd door een waarde
-            #    We doorzoeken regels in de buurt (±8 regels vanaf match)
-            #    Heuristiek: vind regelindex van begin van match
-            start_line_idx = chunk[:pos_start].count("\n")
-            window = lines[start_line_idx: start_line_idx + 12]
-            for idx, ln in enumerate(window):
-                if re.fullmatch(r"(?i)activiteit", ln):
-                    # pak eerstvolgende niet-lege regel als waarde
-                    for j in range(idx + 1, min(idx + 5, len(window))):
-                        if window[j]:
-                            return _clean_activity(window[j])
+            # 2) Soms staat 'Activiteit' er vlak vóór
+            tag = _activity_tag_from_text(ctx_before)
+            if tag:
+                return tag
 
-            # 3) Fallback: 'Activiteit: ...' in voor-context
-            for rx in activity_line_res:
-                m = rx.search(ctx_before)
-                if m and m.lastindex == 1:
-                    return _clean_activity(m.group(1))
-
+            # 3) Heel lokale fallback: pak één regel na de match
+            line_start = chunk[:pos_start].count("\n")
+            for j in range(line_start, min(line_start + 6, len(lines))):
+                t = _activity_tag_from_text(lines[j])
+                if t:
+                    return t
             return ""
 
-        # Verzamel ALLE matches binnen dit datumblok
+        # Verzamel ALLE services binnen dit datumblok
         seen = set()
         for m in service_re.finditer(chunk):
-            raw_label = m.group(1)
+            service_raw = m.group(1)
             start_s, end_s = _fix_2400(m.group(2)), _fix_2400(m.group(3))
+
+            # [Rust] negeren
+            if re.search(r"(?i)rust", service_raw):
+                continue
 
             try:
                 sdt = datetime.combine(d, datetime.strptime(start_s, "%H:%M").time())
@@ -211,25 +245,32 @@ def extract_events_from_text(raw_text: str):
             if edt <= sdt:
                 edt += timedelta(days=1)
 
-            key = (sdt.isoformat(), edt.isoformat())
+            key = (sdt.isoformat(), edt.isoformat(), service_raw.upper())
             if key in seen:
                 continue
             seen.add(key)
 
-            label = _clean_label(raw_label)
-            if not label or "Dienst" not in label.title():
-                label = "Dienst"
+            service_kind = _service_title(service_raw)  # 'Consig' / 'Dienst' / ...
+            activity_tag = find_activity_near(m.start(), m.end())  # bv. 'Wijkzorg'
 
-            # Activiteit zoeken rond deze match
-            act = find_activity_near(m.start(), m.end())
-
-            # Bouw samenvatting & beschrijving
-            if act:
-                summary = f"{act} – {label}"
-                description = f"Activiteit: {act}\nSoort: {label}\nDatum: {d.strftime('%d-%m-%Y')}\nTijd: {start_s} - {end_s}"
+            # --- SUMMARY keuze ---
+            # 1) CONSIG domineert
+            if service_kind.lower() == "consig":
+                summary = "Consig"
+            # 2) Anders, als we een activiteit hebben (bv. Wijkzorg), gebruik die
+            elif activity_tag:
+                summary = activity_tag
+            # 3) Anders generiek
             else:
-                summary = label
-                description = f"Soort: {label}\nDatum: {d.strftime('%d-%m-%Y')}\nTijd: {start_s} - {end_s}"
+                summary = "Dienst"
+
+            # Beschrijving (geen weekdag in titel; hier mag datum/tijd)
+            desc_parts = [f"Type: {service_kind}"]
+            if activity_tag:
+                desc_parts.append(f"Activiteit: {activity_tag}")
+            desc_parts.append(f"Datum: {d.strftime('%d-%m-%Y')}")
+            desc_parts.append(f"Tijd: {start_s} - {end_s}")
+            description = "\n".join(desc_parts)
 
             events.append({
                 "summary": summary,
@@ -280,7 +321,7 @@ def upload():
         # Debug naar Render logs (handig bij issues)
         print(f"[DEBUG] PDF-tekst: {len(raw_text)} chars | gevonden diensten: {len(events)}")
         if events:
-            print("[DEBUG] Voorbeeld:", events[0]["summary"])
+            print("[DEBUG] Voorbeeld:", events[0]["summary"], "|", events[0].get("description","")[:80])
 
         if not events:
             return jsonify(error="Geen diensten gevonden in dit PDF-bestand."), 400
