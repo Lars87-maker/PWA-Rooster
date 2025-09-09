@@ -68,15 +68,37 @@ def extract_text_from_pdf(file_storage) -> str:
     return "\n".join(parts)
 
 def extract_events_from_text(text: str):
+    """
+    Robuuste parser:
+    - Iterate over alle YYYY-datums
+    - Binnen elk datum-blok: pak de EERSTE 'DIENST hh:mm-hh:mm'
+    - Case-insensitive, multiline tolerant
+    """
+    date_iter = list(re.finditer(r"(\d{2}-\d{2}-\d{4})", text))
     events = []
-    for date_s, start_s, end_s in PATTERN.findall(text):
-        d = _parse_date(date_s)
-        start_s = _correct_time_2400(start_s)
-        end_s = _correct_time_2400(end_s)
 
+    for i, dm in enumerate(date_iter):
+        date_str = dm.group(1)
+        # Tekstblok van deze datum t/m de volgende
+        start = dm.end()
+        end = date_iter[i + 1].start() if i + 1 < len(date_iter) else len(text)
+        chunk = text[start:end]
+
+        # zoek de EERSTE dienst in dit blok
+        m = re.search(r"DIENST.*?(\d{2}:\d{2})-(\d{2}:\d{2})",
+                      chunk, re.IGNORECASE | re.DOTALL)
+        if not m:
+            continue  # geen 'DIENST' in dit blok
+
+        start_s, end_s = m.group(1), m.group(2)
+
+        # 24:00 edge case
+        start_s = "23:59" if start_s == "24:00" else start_s
+        end_s   = "23:59" if end_s   == "24:00" else end_s
+
+        d = datetime.strptime(date_str, "%d-%m-%Y").date()
         sdt = datetime.combine(d, datetime.strptime(start_s, "%H:%M").time())
-        edt = datetime.combine(d, datetime.strptime(end_s, "%H:%M").time())
-        # Over-middernacht
+        edt = datetime.combine(d, datetime.strptime(end_s,   "%H:%M").time())
         if edt <= sdt:
             edt += timedelta(days=1)
 
@@ -85,8 +107,8 @@ def extract_events_from_text(text: str):
             "start": sdt,
             "end": edt,
         })
-    return events
 
+    return events
 
 # ---------------- ICS GENERATOR ----------------
 
